@@ -20,6 +20,8 @@ package org.apache.maven.plugins.dependency.analyze;
  */
 
 import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -32,11 +34,13 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.resolver.filter.ArtifactFilter;
+import org.apache.maven.model.Build;
 import org.apache.maven.model.Dependency;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -348,10 +352,19 @@ public abstract class AbstractAnalyzeMojo
         boolean reported = false;
         boolean warning = false;
 
+        Optional<String> maybeMissing = getDependencyXMLForFile( usedUndeclared.keySet(), "missing" );
+        Optional<String> maybeUnused = getDependencyXMLForFile( unusedDeclared, "unused" );
+
+        if ( maybeMissing.isPresent() || maybeUnused.isPresent() )
+        {
+            writeXmlChangeFile( maybeMissing.orElse( "" ) + maybeUnused.orElse( "" ) );
+        }
+
         if ( outputXML )
         {
             writeDependencyXML( usedUndeclared.keySet() );
         }
+
 
         if ( verbose && !usedDeclared.isEmpty() )
         {
@@ -477,6 +490,43 @@ public abstract class AbstractAnalyzeMojo
         }
     }
 
+    private Optional<String> getDependencyXMLForFile( Set<Artifact> artifacts, String section )
+    {
+        if ( !artifacts.isEmpty() )
+        {
+            getLog().info( "Add the following to your pom to correct the missing dependencies: " );
+
+            StringWriter out = new StringWriter();
+            PrettyPrintXMLWriter writer = new PrettyPrintXMLWriter( out );
+
+            writeDependencyXML( artifacts, writer );
+
+            return Optional.of( "<" + section + " name=\"" + project.getName() + "\">\n"
+                + out.getBuffer().toString()
+                + "\n</" + section + ">\n" );
+
+        }
+        return Optional.empty();
+    }
+
+    private void writeXmlChangeFile( String contents )
+    {
+        Build build = project.getModel().getBuild();
+        File targetDir = new File( build.getDirectory() + "/pombot/" );
+        targetDir.mkdir();
+
+        try
+        {
+            FileWriter f1 = new FileWriter( targetDir + "/pomupdates.txt" );
+            f1.write( String.format( "<dependencychanges>\n%s\n</dependencychanges>", contents ) );
+            f1.close();
+        }
+            catch ( IOException e )
+        {
+            e.printStackTrace();
+        }
+    }
+
     private void writeDependencyXML( Set<Artifact> artifacts )
     {
         if ( !artifacts.isEmpty() )
@@ -486,42 +536,47 @@ public abstract class AbstractAnalyzeMojo
             StringWriter out = new StringWriter();
             PrettyPrintXMLWriter writer = new PrettyPrintXMLWriter( out );
 
-            Set<String> managedDependencies = getManagedDependencies();
-            for ( Artifact artifact : artifacts )
+            writeDependencyXML( artifacts, writer );
+
+            getLog().info( "\n" + out.getBuffer() );
+        }
+    }
+
+    private void writeDependencyXML( Set<Artifact> artifacts, PrettyPrintXMLWriter writer )
+    {
+        Set<String> managedDependencies = getManagedDependencies();
+        for ( Artifact artifact : artifacts )
+        {
+            // called because artifact will set the version to -SNAPSHOT only if I do this. MNG-2961
+            artifact.isSnapshot();
+
+            writer.startElement( "dependency" );
+            writer.startElement( "groupId" );
+            writer.writeText( artifact.getGroupId() );
+            writer.endElement();
+            writer.startElement( "artifactId" );
+            writer.writeText( artifact.getArtifactId() );
+            writer.endElement();
+            if ( !managedDependencies.contains( artifact.getDependencyConflictId() ) )
             {
-                // called because artifact will set the version to -SNAPSHOT only if I do this. MNG-2961
-                artifact.isSnapshot();
-
-                writer.startElement( "dependency" );
-                writer.startElement( "groupId" );
-                writer.writeText( artifact.getGroupId() );
+                writer.startElement( "version" );
+                writer.writeText( artifact.getBaseVersion() );
                 writer.endElement();
-                writer.startElement( "artifactId" );
-                writer.writeText( artifact.getArtifactId() );
-                writer.endElement();
-                if ( !managedDependencies.contains( artifact.getDependencyConflictId() ) )
-                {
-                    writer.startElement( "version" );
-                    writer.writeText( artifact.getBaseVersion() );
-                    writer.endElement();
-                }
-                if ( !StringUtils.isBlank( artifact.getClassifier() ) )
-                {
-                    writer.startElement( "classifier" );
-                    writer.writeText( artifact.getClassifier() );
-                    writer.endElement();
-                }
-
-                if ( !Artifact.SCOPE_COMPILE.equals( artifact.getScope() ) )
-                {
-                    writer.startElement( "scope" );
-                    writer.writeText( artifact.getScope() );
-                    writer.endElement();
-                }
+            }
+            if ( !StringUtils.isBlank( artifact.getClassifier() ) )
+            {
+                writer.startElement( "classifier" );
+                writer.writeText( artifact.getClassifier() );
                 writer.endElement();
             }
 
-            getLog().info( "\n" + out.getBuffer() );
+            if ( !Artifact.SCOPE_COMPILE.equals( artifact.getScope() ) )
+            {
+                writer.startElement( "scope" );
+                writer.writeText( artifact.getScope() );
+                writer.endElement();
+            }
+            writer.endElement();
         }
     }
 
